@@ -1,0 +1,84 @@
+name: CD
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: cd-main
+  cancel-in-progress: false
+
+env:
+  PYTHON_VERSION: "3.13"
+  TOMTOM_REGIONS: IDN_jakarta_new
+  AZURE_STORAGE_ACCOUNT: ${{ vars.AZURE_STORAGE_ACCOUNT }}
+  AZURE_STORAGE_CONTAINER: ${{ vars.AZURE_STORAGE_CONTAINER }}
+
+jobs:
+  ingest-and-upload:
+    name: Ingest and upload to Azure Blob
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run scraper
+        run: python -m scraper --regions "$TOMTOM_REGIONS"
+
+      - name: Upload raw JSON
+        run: |
+          az storage blob upload-batch \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --auth-mode login \
+            --destination "$AZURE_STORAGE_CONTAINER" \
+            --destination-path raw \
+            --source data/raw \
+            --overwrite \
+            --output none
+
+      - name: Upload processed CSV
+        run: |
+          az storage blob upload-batch \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --auth-mode login \
+            --destination "$AZURE_STORAGE_CONTAINER" \
+            --destination-path processed \
+            --source data/processed \
+            --overwrite \
+            --output none
+
+      - name: Verify upload
+        run: |
+          az storage blob list \
+            --account-name "$AZURE_STORAGE_ACCOUNT" \
+            --container-name "$AZURE_STORAGE_CONTAINER" \
+            --auth-mode login \
+            --prefix processed/traffic_index/latest.csv \
+            --query "[].{name:name,size:properties.contentLength,modified:properties.lastModified}" \
+            --output table
